@@ -17,7 +17,7 @@ The application uses the following environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | The port the server will listen on | `3000` |
-| `RADIUS_HOST` | RADIUS server hostname or IP address | `13.213.197.42` |
+| `RADIUS_HOST` | RADIUS server hostname or IP address | `10.0.0.1` |
 | `RADIUS_PORT` | RADIUS server port | `1812` |
 | `RADIUS_SECRET` | RADIUS server shared secret | `testing123` |
 | `ALLOWED_FILTER_ID` | The Filter-ID that should be granted access | `StaffPolicy` |

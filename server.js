@@ -23,7 +23,7 @@ const port = process.env.PORT || 3000;
 const APP_VERSION = '3.1.0';
 
 // RADIUS server configuration from environment variables
-const RADIUS_HOST = process.env.RADIUS_HOST || '192.168.1.108'; // Default to a local IP or 13.213.197.42
+const RADIUS_HOST = process.env.RADIUS_HOST || '192.168.1.108'; 
 const RADIUS_PORT = parseInt(process.env.RADIUS_PORT || '1812');
 const RADIUS_SECRET = process.env.RADIUS_SECRET || 'testing123';
 
