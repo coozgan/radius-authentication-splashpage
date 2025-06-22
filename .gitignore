@@ -1,0 +1,14 @@
+# Ignore log files and sensitive data
+*.log
+*.json
+webhook_log.txt
+lambda_log.json
+webhook_log.json
+server.log
+.env
+# Node modules
+node_modules/
+# Ignore Docker secrets if any
+secrets.env
+# Ignore VSCode settings
+.vscode/

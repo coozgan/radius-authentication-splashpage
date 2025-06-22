@@ -1,0 +1,156 @@
+/* css */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(to bottom, #1C408110, #FFFFFF);
+    color: #333;
+    line-height: 1.6;
+}
+
+.splash-bg {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(to bottom, #1C408110, #FFFFFF);
+}
+
+.splash-container {
+    width: 100%;
+    max-width: 500px;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    padding: 32px 24px 24px 24px;
+    margin: 32px 0;
+    border-top: 8px solid #1C4081;
+}
+
+.splash-header {
+    text-align: center;
+    margin-bottom: 24px;
+}
+.splash-logo {
+    width: 180px;
+    height: 60px;
+    object-fit: contain;
+    margin: 0 auto 16px auto;
+    display: block;
+}
+.splash-title {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #1C4081;
+}
+.splash-subtitle {
+    margin-top: 8px;
+    color: #1C4081;
+}
+
+.login-form {
+    margin-bottom: 16px;
+}
+.form-group {
+    margin-bottom: 16px;
+}
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 500;
+    color: #1C4081;
+}
+.form-group input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 16px;
+    background: #fafbfc;
+}
+.form-actions {
+    margin-top: 20px;
+}
+.form-actions button {
+    width: 100%;
+    padding: 10px 0;
+    background-color: #1C4081;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+.form-actions button:hover {
+    background-color: #CE483F;
+}
+.form-actions button:disabled {
+    background-color: #95a5a6;
+    cursor: not-allowed;
+}
+
+#statusContainer {
+    margin-top: 8px;
+}
+.error-message, .success-message {
+    padding: 10px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    display: none;
+    font-size: 0.95rem;
+}
+.error-message {
+    background-color: #f8d7da;
+    color: #CE483F;
+    border: 1px solid #f5c6cb;
+}
+.success-message {
+    background-color: #d4edda;
+    color: #1C4081;
+    border: 1px solid #c3e6cb;
+}
+.loading-indicator {
+    display: none;
+    text-align: center;
+    padding: 16px 0;
+}
+.spinner {
+    width: 32px;
+    height: 32px;
+    margin: 0 auto 10px auto;
+    border: 4px solid rgba(0,0,0,0.1);
+    border-radius: 50%;
+    border-top: 4px solid #1C4081;
+    animation: spin 1s linear infinite;
+}
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+.splash-footer {
+    margin-top: 24px;
+    text-align: center;
+    font-size: 0.9rem;
+    color: #888;
+}
+.footer-link {
+    color: #CE483F;
+    text-decoration: underline;
+}
+.footer-link:hover {
+    color: #1C4081;
+}
+
+/* Responsive adjustments */
+@media (max-width: 520px) {
+    .splash-container {
+        margin: 20px 10px;
+        width: calc(100% - 20px);
+    }
+}
