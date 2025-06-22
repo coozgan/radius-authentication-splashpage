@@ -150,4 +150,4 @@ Once deployed, you can test the server by accessing the `/test-splash` endpoint.
 
 1. Always use secure RADIUS_SECRET values in production
 2. Consider using AWS Secrets Manager for storing the RADIUS_SECRET in ECS
-3. Make sure your security groups allow UDP traffic to your RADIUS server on the appropriate port
+3. Make sure your security groups allow UDP traffic to your RADIUS server on the appropriate port# radius-authentication-splashpage
