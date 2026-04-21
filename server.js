@@ -8,10 +8,14 @@
  * Version: 3.1.0
  */
 
+// Load environment variables from .env file
+require('dotenv').config();
+
 // Core dependencies
 const express = require('express');
 const radius = require('radius');
 const dgram = require('dgram');
+const https = require('https');
 const bodyParser = require('body-parser');
 const path = require('path');
 const fs = require('fs');
@@ -23,14 +27,27 @@ const port = process.env.PORT || 3000;
 const APP_VERSION = '3.1.0';
 
 // RADIUS server configuration from environment variables
-const RADIUS_HOST = process.env.RADIUS_HOST || '13.250.55.36'; 
+const RADIUS_HOST = process.env.RADIUS_HOST || '192.168.1.108'; 
 const RADIUS_PORT = parseInt(process.env.RADIUS_PORT || '1812');
 const RADIUS_SECRET = process.env.RADIUS_SECRET || 'testing123';
+const NAS_IP_ADDRESS = process.env.NAS_IP_ADDRESS; // optional override
+const NAS_IDENTIFIER = process.env.NAS_IDENTIFIER; // optional
+const RADIUS_TIMEOUT_MS = parseInt(process.env.RADIUS_TIMEOUT_MS || '10000');
+const RADIUS_DEBUG = process.env.RADIUS_DEBUG === '1';
+
+// Meraki API configuration
+const MERAKI_API_KEY = process.env.MERAKI_API_KEY;
+const MERAKI_NETWORK_ID = process.env.MERAKI_NETWORK_ID;
+const MERAKI_DEVICE_RENAME_ENABLED = process.env.MERAKI_DEVICE_RENAME_ENABLED === '1';
+const TEST_USER = process.env.TEST_USER; // Skip Meraki API calls for this user
 
 // Filter-ID configuration from environment variable
 // Default is StaffPolicy if not specified
 const ALLOWED_FILTER_ID = process.env.ALLOWED_FILTER_ID || 'StaffPolicy';
 const ACCESS_DENIED_MESSAGE = process.env.ACCESS_DENIED_MESSAGE || 'You don\'t belong to this SSID';
+const ACCESS_GRANTED_MESSAGE = process.env.ACCESS_GRANTED_MESSAGE || 'Access granted - Account verified';
+// If set to '0', a missing / different Filter-Id will not hard fail auth (helpful for debugging)
+const AUTH_REQUIRE_FILTER_ID = process.env.AUTH_REQUIRE_FILTER_ID !== '0';
 
 // Simple file logger
 const logToFile = (message) => {
@@ -91,7 +108,7 @@ app.get('/test-splash', (req, res) => {
     try {
         // Build the redirect URL with test parameters
         const baseUrl = `${req.protocol}://${req.get('host')}/`;
-        const redirectUrl = `${baseUrl}?base_grant_url=https://n143.network-auth.com/splash/grant&user_continue_url=http://google.com&node_mac=00:11:22:33:44:55&client_ip=10.0.0.1&client_mac=AA:BB:CC:DD:EE:FF`;
+        const redirectUrl = `${baseUrl}?base_grant_url=https://n143.network-auth.com/splash/grant&user_continue_url=http://google.com&node_mac=00:11:22:33:44:55&client_ip=10.0.0.1&client_mac=aa:bb:cc:aa:ff:ee`;
         return res.redirect(redirectUrl);
     } catch (err) {
         console.error('Error in test-splash route:', err);
@@ -135,7 +152,8 @@ app.post('/auth/radius', async (req, res) => {
             password,
             client_mac,
             client_ip,
-            node_mac
+            node_mac,
+            ssid // allow caller to provide SSID (Meraki sometimes can pass via query/body)
         } = req.body;
 
         // Validate inputs
@@ -148,44 +166,90 @@ app.post('/auth/radius', async (req, res) => {
         }
 
         // Perform RADIUS authentication
-        const result = await authenticateWithRadius(username, password);
+        const result = await authenticateWithRadius(
+            username,
+            password,
+            {
+                clientMac: client_mac,
+                clientIp: client_ip,
+                nodeMac: node_mac,
+                ssid
+            }
+        );
 
         if (result.success) {
             console.log(`Authentication successful for user: ${username}`);
             logToFile(`Authentication successful for user: ${username}, Filter-Id: ${result.filterId || 'none'}`);
 
             // Check if user has the allowed Filter-Id
-            if (result.filterId === ALLOWED_FILTER_ID) {
-                // Add this with your other environment variables near the top of the file
-                const ACCESS_GRANTED_MESSAGE = process.env.ACCESS_GRANTED_MESSAGE || 'Access granted - Account verified';
-                
-                // Modified success response code:
+            const filterMatch = result.filterId === ALLOWED_FILTER_ID;
+
+            if (filterMatch || !AUTH_REQUIRE_FILTER_ID) {
+                if (!filterMatch) {
+                    console.log(`WARNING: Filter-Id mismatch (expected ${ALLOWED_FILTER_ID}, got ${result.filterId || 'none'}) but AUTH_REQUIRE_FILTER_ID=0 so allowing.`);
+                }
+
+                // Attempt to rename device via Meraki API after successful authentication
+                if (MERAKI_DEVICE_RENAME_ENABLED && client_mac) {
+                    // Skip Meraki API call if username matches TEST_USER
+                    // Extract username part (before @) for comparison
+                    const usernameOnly = username.split('@')[0];
+                    const testUserOnly = TEST_USER ? TEST_USER.split('@')[0] : null;
+                    
+                    if (testUserOnly && usernameOnly === testUserOnly) {
+                        console.log(`Skipping Meraki API call for test user: ${username}`);
+                    } else {
+                        renameDeviceInMeraki(username, client_mac)
+                            .then(renameResult => {
+                                if (renameResult.success) {
+                                    console.log(`Device renamed successfully: ${renameResult.deviceName}`);
+                                } else {
+                                    console.log(`Device rename failed: ${renameResult.error}`);
+                                }
+                            })
+                            .catch(err => {
+                                console.error(`Device rename error: ${err.message}`);
+                            });
+                    }
+                }
+
                 return res.status(200).json({
                     success: true,
                     message: 'Authentication successful',
                     filterId: result.filterId,
                     validation: {
                         status: 'success',
-                        message: ACCESS_GRANTED_MESSAGE
-                    }
-                });
-            } else {
-                console.log(`User does not have ${ALLOWED_FILTER_ID} Filter-Id - Access denied`);
-                return res.status(403).json({
-                    success: false,
-                    message: ACCESS_DENIED_MESSAGE,
-                    filterId: result.filterId,
-                    validation: {
-                        status: 'error',
-                        message: `Access denied - ${ACCESS_DENIED_MESSAGE}`
+                        message: ACCESS_GRANTED_MESSAGE,
+                        filterPolicy: {
+                            required: ALLOWED_FILTER_ID,
+                            received: result.filterId || null,
+                            enforced: AUTH_REQUIRE_FILTER_ID
+                        }
                     }
                 });
             }
+
+            console.log(`User does not have required Filter-Id (${ALLOWED_FILTER_ID}) - Access denied`);
+            return res.status(403).json({
+                success: false,
+                message: ACCESS_DENIED_MESSAGE,
+                filterId: result.filterId,
+                validation: {
+                    status: 'error',
+                    message: `Access denied - ${ACCESS_DENIED_MESSAGE}`,
+                    filterPolicy: {
+                        required: ALLOWED_FILTER_ID,
+                        received: result.filterId || null,
+                        enforced: AUTH_REQUIRE_FILTER_ID
+                    }
+                }
+            });
         } else {
             console.log(`Authentication failed for user: ${username}`);
             return res.status(401).json({
                 success: false,
-                message: result.message || 'Authentication failed'
+                message: result.message || 'Authentication failed',
+                radius: result.radius || undefined
             });
         }
     } catch (error) {
@@ -201,8 +265,104 @@ app.post('/auth/radius', async (req, res) => {
     }
 });
 
+// Meraki API function to rename device
+async function renameDeviceInMeraki(email, macAddress) {
+    try {
+        // Validate required configuration
+        if (!MERAKI_API_KEY || !MERAKI_NETWORK_ID) {
+            return {
+                success: false,
+                error: 'Meraki API credentials not configured'
+            };
+        }
+
+        // Extract username from email (before @ symbol)
+        const username = email.split('@')[0];
+        
+        // Extract last 4 characters from MAC address (without colons/dashes)
+        const macNoSeparators = macAddress.replace(/[:-]/g, '').toLowerCase();
+        const last4Mac = macNoSeparators.slice(-4);
+        
+        // Construct device name: username.last4mac
+        const deviceName = `${username}.${last4Mac}`;
+        
+        console.log(`Attempting to rename device ${macAddress} to ${deviceName}`);
+        
+        // Prepare API request
+        const url = `https://api.meraki.com/api/v1/networks/${MERAKI_NETWORK_ID}/clients/provision`;
+        const payload = {
+            clients: [
+                {
+                    mac: macAddress,
+                    name: deviceName
+                }
+            ],
+            devicePolicy: 'Normal'
+        };
+        
+        // Make API call using https module
+        return new Promise((resolve, reject) => {
+            const postData = JSON.stringify(payload);
+            
+            const options = {
+                hostname: 'api.meraki.com',
+                port: 443,
+                path: `/api/v1/networks/${MERAKI_NETWORK_ID}/clients/provision`,
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${MERAKI_API_KEY}`,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Content-Length': Buffer.byteLength(postData)
+                }
+            };
+            
+            const req = https.request(options, (res) => {
+                let data = '';
+                
+                res.on('data', (chunk) => {
+                    data += chunk;
+                });
+                
+                res.on('end', () => {
+                    if (res.statusCode >= 200 && res.statusCode < 300) {
+                        console.log(`Meraki API response: ${res.statusCode}`);
+                        resolve({
+                            success: true,
+                            deviceName: deviceName,
+                            response: data
+                        });
+                    } else {
+                        console.error(`Meraki API error: ${res.statusCode} - ${data}`);
+                        resolve({
+                            success: false,
+                            error: `API returned status ${res.statusCode}: ${data}`
+                        });
+                    }
+                });
+            });
+            
+            req.on('error', (err) => {
+                console.error('Meraki API request error:', err);
+                reject(err);
+            });
+            
+            // Write data to request body
+            req.write(postData);
+            req.end();
+        });
+        
+    } catch (error) {
+        console.error('Error in renameDeviceInMeraki:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
 // RADIUS authentication function
-function authenticateWithRadius(username, password) {
+function authenticateWithRadius(username, password, context = {}) {
     return new Promise((resolve, reject) => {
         // Create UDP client
         const client = dgram.createSocket('udp4');
@@ -236,9 +396,9 @@ function authenticateWithRadius(username, password) {
                 console.log('Decoded response code:', response.code);
 
                 // Log only in debug mode to save on CloudWatch costs
-                // if (response.attributes) {
-                //     console.log('RADIUS Attributes:', JSON.stringify(response.attributes, null, 2));
-                // }
+                if (RADIUS_DEBUG && response.attributes) {
+                    console.log('RADIUS Attributes:', JSON.stringify(response.attributes, null, 2));
+                }
 
                 closeSafely();
 
@@ -251,9 +411,16 @@ function authenticateWithRadius(username, password) {
                     resolve({ success: true, filterId: filterId });
                 } else {
                     console.log('Authentication failed. Response code:', response.code);
+                    const replyMessage = response.attributes && response.attributes['Reply-Message']
+                        ? response.attributes['Reply-Message']
+                        : undefined;
                     resolve({
                         success: false,
-                        message: `Authentication failed. Please check your credentials.`
+                        message: replyMessage || `Authentication failed. Please check your credentials.`,
+                        radius: {
+                            code: response.code,
+                            replyMessage
+                        }
                     });
                 }
             } catch (err) {
@@ -270,11 +437,34 @@ function authenticateWithRadius(username, password) {
                 identifier: Math.floor(Math.random() * 256),
                 attributes: [
                     ['User-Name', username],
-                    ['User-Password', password],
-                    ['NAS-IP-Address', '127.0.0.1'],
+                    ['User-Password', password], // PAP
+                    ['Service-Type', 'Framed-User'],
                     ['NAS-Port', 0]
                 ]
             };
+
+            // Determine NAS-IP-Address
+            const nasIp = NAS_IP_ADDRESS || detectServerIP();
+            if (nasIp) packet.attributes.push(['NAS-IP-Address', nasIp]);
+            if (NAS_IDENTIFIER) packet.attributes.push(['NAS-Identifier', NAS_IDENTIFIER]);
+
+            // Add contextual attributes if provided
+            if (context.clientMac) {
+                packet.attributes.push(['Calling-Station-Id', context.clientMac]);
+            }
+            if (context.nodeMac || context.ssid) {
+                // Called-Station-Id format often AP_MAC:SSID (AP MAC no separators) or AP_MAC:SSID
+                let called = context.nodeMac || '';
+                if (called && called.includes(':')) called = called.toUpperCase().replace(/:/g, '-');
+                if (context.ssid) {
+                    called = called ? `${called}:${context.ssid}` : context.ssid;
+                }
+                if (called) packet.attributes.push(['Called-Station-Id', called]);
+            }
+
+            if (RADIUS_DEBUG) {
+                console.log('Outgoing RADIUS attributes:', JSON.stringify(packet.attributes, null, 2));
+            }
 
             // Encode the packet with shared secret
             const encoded = radius.encode({
@@ -304,7 +494,7 @@ function authenticateWithRadius(username, password) {
                 console.log('RADIUS request timed out');
                 closeSafely();
                 resolve({ success: false, message: 'Authentication server timed out' });
-            }, 10000); // 10 second timeout
+            }, RADIUS_TIMEOUT_MS);
 
         } catch (err) {
             console.error('Failed to create RADIUS request:', err);
@@ -331,6 +521,22 @@ function authenticateWithRadius(username, password) {
             } catch (err) {
                 console.error('Error closing socket:', err);
             }
+        }
+
+        function detectServerIP() {
+            try {
+                const ifs = os.networkInterfaces();
+                for (const name of Object.keys(ifs)) {
+                    for (const iface of ifs[name]) {
+                        if (iface.family === 'IPv4' && !iface.internal) {
+                            return iface.address;
+                        }
+                    }
+                }
+            } catch (e) {
+                if (RADIUS_DEBUG) console.log('Failed to detect server IP:', e.message);
+            }
+            return null;
         }
     });
 }

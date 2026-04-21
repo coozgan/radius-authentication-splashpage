@@ -6,6 +6,7 @@ A simple and customizable RADIUS authentication splash page for Meraki networks 
 
 - RADIUS authentication for Meraki splash pages
 - Filter-ID based access control
+- **Automatic device renaming via Meraki API** (see [MERAKI_DEVICE_RENAME.md](MERAKI_DEVICE_RENAME.md))
 - Customizable error messages
 - Containerized for easy deployment in ECS or any Docker environment
 - Environment variable configuration
@@ -22,6 +23,9 @@ The application uses the following environment variables:
 | `RADIUS_SECRET` | RADIUS server shared secret | `testing123` |
 | `ALLOWED_FILTER_ID` | The Filter-ID that should be granted access | `StaffPolicy` |
 | `ACCESS_DENIED_MESSAGE` | Message to show when access is denied | `You don't belong to this SSID` |
+| `MERAKI_API_KEY` | Meraki API key for device provisioning | _(optional)_ |
+| `MERAKI_NETWORK_ID` | Meraki Network ID for device provisioning | _(optional)_ |
+| `MERAKI_DEVICE_RENAME_ENABLED` | Enable automatic device renaming (`1` = enabled) | _(optional)_ |
 
 ## Docker Build & Run
 
