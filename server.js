@@ -20,6 +20,7 @@ const bodyParser = require('body-parser');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
 
 // Application setup
 const app = express();
@@ -40,6 +41,13 @@ const MERAKI_API_KEY = process.env.MERAKI_API_KEY;
 const MERAKI_NETWORK_ID = process.env.MERAKI_NETWORK_ID;
 const MERAKI_DEVICE_RENAME_ENABLED = process.env.MERAKI_DEVICE_RENAME_ENABLED === '1';
 const TEST_USER = process.env.TEST_USER; // Skip Meraki API calls for this user
+
+// SQS client tracking configuration
+const SQS_QUEUE_URL = process.env.SQS_QUEUE_URL;
+const NETWORK_SSID = process.env.NETWORK_SSID || '';
+const sqsClient = SQS_QUEUE_URL
+    ? new SQSClient({ region: process.env.AWS_REGION || 'ap-southeast-1' })
+    : null;
 
 // Filter-ID configuration from environment variable
 // Default is StaffPolicy if not specified
@@ -189,16 +197,14 @@ app.post('/auth/radius', async (req, res) => {
                     console.log(`WARNING: Filter-Id mismatch (expected ${ALLOWED_FILTER_ID}, got ${result.filterId || 'none'}) but AUTH_REQUIRE_FILTER_ID=0 so allowing.`);
                 }
 
-                // Attempt to rename device via Meraki API after successful authentication
-                if (MERAKI_DEVICE_RENAME_ENABLED && client_mac) {
-                    // Skip Meraki API call if username matches TEST_USER
-                    // Extract username part (before @) for comparison
-                    const usernameOnly = username.split('@')[0];
-                    const testUserOnly = TEST_USER ? TEST_USER.split('@')[0] : null;
-                    
-                    if (testUserOnly && usernameOnly === testUserOnly) {
-                        console.log(`Skipping Meraki API call for test user: ${username}`);
-                    } else {
+                // Skip all side-effects (Meraki + SQS tracking) for the health-check test user
+                const isTestUser = TEST_USER && username.toLowerCase() === TEST_USER.toLowerCase();
+
+                if (isTestUser) {
+                    console.log(`Test user detected (${username}) — skipping Meraki and client tracking`);
+                } else {
+                    // Rename device in Meraki dashboard
+                    if (MERAKI_DEVICE_RENAME_ENABLED && client_mac) {
                         renameDeviceInMeraki(username, client_mac)
                             .then(renameResult => {
                                 if (renameResult.success) {
@@ -210,6 +216,11 @@ app.post('/auth/radius', async (req, res) => {
                             .catch(err => {
                                 console.error(`Device rename error: ${err.message}`);
                             });
+                    }
+
+                    // Publish auth event to SQS for DynamoDB client tracking (async, non-blocking)
+                    if (client_mac) {
+                        publishClientEvent(username, client_mac, client_ip, NETWORK_SSID);
                     }
                 }
 
@@ -264,6 +275,32 @@ app.post('/auth/radius', async (req, res) => {
         console.log('=================================================');
     }
 });
+
+// Publishes a client auth event to SQS for async DynamoDB tracking.
+// Non-blocking — failures are logged but do not affect the auth response.
+async function publishClientEvent(username, clientMac, clientIp, ssid) {
+    if (!sqsClient || !SQS_QUEUE_URL) return;
+
+    try {
+        const payload = {
+            clientId:   clientMac,
+            clientName: username,
+            macAddress: clientMac,
+            clientIp:   clientIp || '',
+            ssid:       ssid || '',
+        };
+
+        await sqsClient.send(new SendMessageCommand({
+            QueueUrl:    SQS_QUEUE_URL,
+            MessageBody: JSON.stringify(payload),
+        }));
+
+        console.log(`Client event queued for tracking: ${clientMac} (${username})`);
+    } catch (err) {
+        // Log and continue — client tracking must not block or fail authentication
+        console.error(`Failed to queue client event for ${clientMac}: ${err.message}`);
+    }
+}
 
 // Meraki API function to rename device
 async function renameDeviceInMeraki(email, macAddress) {

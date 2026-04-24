@@ -41,7 +41,7 @@ function extractAndLogParameters() {
     node_mac = urlParams.get('node_mac') || '';
     client_ip = urlParams.get('client_ip') || '';
     client_mac = urlParams.get('client_mac') || '';
-    
+
     // Log extracted parameters
     console.log('Extracted Meraki parameters:');
     console.log('- base_grant_url:', base_grant_url);

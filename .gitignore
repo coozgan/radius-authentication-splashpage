@@ -12,3 +12,16 @@ node_modules/
 secrets.env
 # Ignore VSCode settings
 .vscode/
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+**/.terraform.lock.hcl
+.terraform
+.terraform.lock.hcl
+
+
+# macOS
+.DS_Store
+**/.DS_Store
