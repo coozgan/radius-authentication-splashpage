@@ -1,3 +1,4 @@
+export const runtime = 'edge';
 import { NextResponse } from 'next/server';
 
 const API_URL = process.env.DASHBOARD_API_URL!;

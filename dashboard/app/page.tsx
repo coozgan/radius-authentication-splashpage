@@ -1,7 +1,7 @@
 import { fetchClients } from '@/lib/api';
 import ClientsTable from '@/components/ClientsTable';
 
-// Always fetch fresh data — clients can change at any time
+export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
