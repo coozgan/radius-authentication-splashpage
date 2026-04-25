@@ -276,6 +276,14 @@ app.post('/auth/radius', async (req, res) => {
     }
 });
 
+// Builds the canonical device/client name used in both Meraki and DynamoDB:
+//   "john.doe@ics.edu.sg" + "aa:bb:cc:dd:ee:ff"  →  "john.doe.eeff"
+function buildDeviceName(email, macAddress) {
+    const userPart = email.split('@')[0];
+    const last4Mac = macAddress.replace(/[:-]/g, '').toLowerCase().slice(-4);
+    return `${userPart}.${last4Mac}`;
+}
+
 // Publishes a client auth event to SQS for async DynamoDB tracking.
 // Non-blocking — failures are logged but do not affect the auth response.
 async function publishClientEvent(username, clientMac, clientIp, ssid) {
@@ -284,7 +292,7 @@ async function publishClientEvent(username, clientMac, clientIp, ssid) {
     try {
         const payload = {
             clientId:   clientMac,
-            clientName: username,
+            clientName: buildDeviceName(username, clientMac),
             macAddress: clientMac,
             clientIp:   clientIp || '',
             ssid:       ssid || '',
@@ -313,15 +321,7 @@ async function renameDeviceInMeraki(email, macAddress) {
             };
         }
 
-        // Extract username from email (before @ symbol)
-        const username = email.split('@')[0];
-        
-        // Extract last 4 characters from MAC address (without colons/dashes)
-        const macNoSeparators = macAddress.replace(/[:-]/g, '').toLowerCase();
-        const last4Mac = macNoSeparators.slice(-4);
-        
-        // Construct device name: username.last4mac
-        const deviceName = `${username}.${last4Mac}`;
+        const deviceName = buildDeviceName(email, macAddress);
         
         console.log(`Attempting to rename device ${macAddress} to ${deviceName}`);
         

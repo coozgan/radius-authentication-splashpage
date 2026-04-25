@@ -45,3 +45,15 @@ variable "dlq_alarm_email" {
   type        = string
   default     = ""
 }
+
+variable "meraki_network_id" {
+  description = "Meraki network ID for the splash authorization API calls (e.g. L_3966545371806568169)"
+  type        = string
+  default     = "L_3966545371806568169"
+}
+
+variable "ssid_map" {
+  description = "JSON map of SSID name to Meraki SSID number, e.g. {\"ICS-Staff\":\"1\",\"ICS-HS\":\"7\"}"
+  type        = string
+  default     = "{\"ICS-Staff\":\"1\",\"ICS-HS\":\"7\"}"
+}

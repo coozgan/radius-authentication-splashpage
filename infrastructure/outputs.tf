@@ -37,3 +37,13 @@ output "ecs_task_role_arn" {
   description = "ECS task role ARN — set as taskRoleArn in task-definition.json"
   value       = aws_iam_role.ecs_task_role.arn
 }
+
+output "dashboard_api_url" {
+  description = "HTTP API Gateway URL — set as DASHBOARD_API_URL in dashboard/.env.local"
+  value       = aws_apigatewayv2_api.dashboard.api_endpoint
+}
+
+output "meraki_secret_arn" {
+  description = "Secrets Manager ARN — set the API key value with: aws secretsmanager put-secret-value --secret-id <arn> --secret-string '{\"api_key\":\"YOUR_KEY\"}'"
+  value       = aws_secretsmanager_secret.meraki_api_key.arn
+}
