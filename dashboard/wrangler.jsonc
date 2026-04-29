@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wifi-client-dashboard",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-04-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  }
+  // Set DASHBOARD_API_URL in Cloudflare → Worker → Settings → Variables & Secrets,
+  // or via:  wrangler secret put DASHBOARD_API_URL
+  // Do NOT commit the actual URL here.
+}
