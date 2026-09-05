@@ -148,6 +148,38 @@ resource "aws_cloudwatch_metric_alarm" "sweeper_unexpected_stop" {
   alarm_actions       = var.dlq_alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
 }
 
+# A row that exhausted its retry budget and was disabled. This is otherwise the
+# only silent terminal path in the feature: per-row failures are caught inside
+# the handler, so they never reach the AWS/Lambda Errors metric, and
+# isUnexpectedStop() excludes failureCount > 0 so the alarm above misses it.
+# Without this the device's authorization just lapses with nobody notified.
+resource "aws_cloudwatch_log_metric_filter" "sweeper_failure_cap" {
+  name           = "${var.project}-schedule-failure-cap"
+  log_group_name = aws_cloudwatch_log_group.sweeper_logs.name
+  pattern        = "SCHEDULE_FAILURE_CAP_REACHED"
+
+  metric_transformation {
+    name          = "ScheduleFailureCapReached"
+    namespace     = "${var.project}/Schedules"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "sweeper_failure_cap" {
+  alarm_name          = "${var.project}-schedule-failure-cap"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = aws_cloudwatch_log_metric_filter.sweeper_failure_cap.metric_transformation[0].name
+  namespace           = aws_cloudwatch_log_metric_filter.sweeper_failure_cap.metric_transformation[0].namespace
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_description   = "A schedule was disabled after 5 consecutive failures (expired Meraki key, SSID missing from SSID_MAP, client deleted). Its device will lose authorization at the real expiry unless someone intervenes."
+  alarm_actions       = var.dlq_alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
+}
+
 # ── Lambda ────────────────────────────────────────────────
 
 # Filenames MUST preserve the lambda-src/ layout: index.js resolves its imports

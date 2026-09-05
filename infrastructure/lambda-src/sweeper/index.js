@@ -18,8 +18,20 @@ const { advanceSchedule, dueFilter, MAX_CONSECUTIVE_FAILURES } = require('../sha
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE_NAME;
 const LEAD_DAYS = Number(process.env.AUTORENEW_LEAD_DAYS || 7);
 
-/** Logged verbatim; a CloudWatch metric filter alarms on this token. */
+// Logged verbatim; CloudWatch metric filters in schedules.tf grep for these
+// exact strings. Changing one silently disarms its alarm — the sweeper tests
+// pin both tokens for that reason.
 const STOPPED_TOKEN = 'SCHEDULE_STOPPED_UNEXPECTED';
+const CAP_TOKEN = 'SCHEDULE_FAILURE_CAP_REACHED';
+
+// Each row costs a GetItem + a Meraki PUT + an UpdateItem, so in-flight rows
+// map roughly 1:1 to Meraki requests. Meraki allows ~10 req/s per org; 4 keeps
+// a sweep near half that even when every request returns instantly, leaving
+// headroom for the dashboard API hitting the same org concurrently. Without a
+// bound, a post-outage backlog fires every due row at once, collects 429s, and
+// increments FailureCount on all of them together — turning independent
+// failures into correlated ones and mass-disabling the schedule set.
+const MAX_CONCURRENCY = 4;
 
 /**
  * Deterministic id for the revoke a schedule spawns, so a retried sweep
@@ -142,6 +154,18 @@ async function runOne(schedule, nowIso) {
             `${decision.failureCount}/${MAX_CONSECUTIVE_FAILURES}` +
             `${decision.disable ? ' — cap reached, disabling' : ' — will retry next sweep'}`
         );
+        // The cap is the only silent terminal path: the row goes Enabled=false
+        // and the device's authorization simply lapses at its real expiry with
+        // nobody told. isUnexpectedStop() excludes failureCount > 0, and
+        // per-row errors never reach the Lambda Errors metric, so this token is
+        // the sole signal.
+        if (decision.disable) {
+            console.error(
+                `${CAP_TOKEN} schedule ${schedule.ScheduleID} (client ${schedule.ClientID}) ` +
+                `disabled after ${decision.failureCount} consecutive failures; ` +
+                `last error: ${outcome.ok ? 'n/a' : outcome.error}`
+            );
+        }
     }
     if (isUnexpectedStop(schedule, decision)) {
         console.error(
@@ -151,8 +175,38 @@ async function runOne(schedule, nowIso) {
         );
     }
 
-    await applyDecision(schedule, decision, outcome, nowIso);
+    // Deliberately outside the try above: a throw here means the decision was
+    // never persisted, so FailureCount does not advance and the row re-fires
+    // every sweep uncapped. The cause is a persistent DynamoDB/IAM fault that
+    // this layer cannot recover from — but it must not be silent.
+    try {
+        await applyDecision(schedule, decision, outcome, nowIso);
+    } catch (e) {
+        console.error(
+            `Schedule ${schedule.ScheduleID} (client ${schedule.ClientID}) decision not persisted: ` +
+            `${e.message} — row will re-fire next sweep without advancing FailureCount`
+        );
+        throw e;
+    }
     return outcome.ok;
+}
+
+/** Runs `worker` over `items` with at most `limit` in flight. */
+async function pooled(items, limit, worker) {
+    const results = new Array(items.length);
+    let next = 0;
+    const run = async () => {
+        while (next < items.length) {
+            const i = next++;
+            try {
+                results[i] = { status: 'fulfilled', value: await worker(items[i]) };
+            } catch (reason) {
+                results[i] = { status: 'rejected', reason };
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+    return results;
 }
 
 exports.handler = async () => {
@@ -165,9 +219,11 @@ exports.handler = async () => {
     }
 
     console.log(`Processing ${due.length} due schedule(s)`);
-    // ponytail: unbounded fan-out — fine at hundreds of rows within the 300s
-    // timeout; add a concurrency limit if a sweep ever nears it.
-    const results = await Promise.allSettled(due.map(s => runOne(s, nowIso)));
+    // ponytail: fixed pool of MAX_CONCURRENCY. The near-term ceiling is Meraki's
+    // ~10 req/s per-org rate limit, not the 300s timeout — at 4 in flight a
+    // sweep of ~1200 rows would be the first to run long. Add adaptive backoff
+    // on 429 before raising this.
+    const results = await pooled(due, MAX_CONCURRENCY, s => runOne(s, nowIso));
 
     const ok = results.filter(r => r.status === 'fulfilled' && r.value).length;
     const failed = due.length - ok;
@@ -179,3 +235,8 @@ exports.handler = async () => {
 module.exports.revokeScheduleId = revokeScheduleId;
 module.exports.isUnexpectedStop = isUnexpectedStop;
 module.exports.buildScheduleUpdate = buildScheduleUpdate;
+module.exports.applyDecision = applyDecision;
+module.exports.runOne = runOne;
+module.exports.pooled = pooled;
+module.exports.STOPPED_TOKEN = STOPPED_TOKEN;
+module.exports.CAP_TOKEN = CAP_TOKEN;
