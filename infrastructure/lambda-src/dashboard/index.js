@@ -235,7 +235,11 @@ exports.handler = async (event) => {
                     Key: { ScheduleID: scheduleId },
                     UpdateExpression: 'SET #enabled = :false, LastResult = :res',
                     ConditionExpression: 'attribute_exists(ScheduleID)',
-                    // Enabled is a DynamoDB reserved word.
+                    // Aliased for consistency with the sweeper, which aliases
+                    // Enabled everywhere it touches it. ENABLED is not itself a
+                    // DynamoDB reserved word (ENABLE is), so this is defensive
+                    // rather than required — it costs nothing and keeps the
+                    // attribute safe if it is ever renamed to one that is.
                     ExpressionAttributeNames: { '#enabled': 'Enabled' },
                     ExpressionAttributeValues: { ':false': false, ':res': 'cancelled' },
                 }));

@@ -50,6 +50,31 @@ test('rejects an unparseable timestamp', () => {
     assert.strictEqual(r.ok, false);
 });
 
+test('rejects an unparseable runAt as invalid, not as a past time', () => {
+    // Pins the null-guard on its own merits. Without it the value still gets
+    // rejected — null coerces to 0 in `at <= nowMs`, so it fails the past-check
+    // instead — but the caller is told their timestamp is in the past when it
+    // is actually gibberish. Fail-closed either way; wrong diagnosis for the user.
+    for (const runAt of ['next tuesday', '', 'null', undefined]) {
+        const r = validateScheduleInput({ ...OK, runAt }, NOW);
+        assert.strictEqual(r.ok, false);
+        assert.match(r.error, /valid timestamp/i, `runAt ${JSON.stringify(runAt)}`);
+        assert.doesNotMatch(r.error, /past/i, `runAt ${JSON.stringify(runAt)}`);
+    }
+});
+
+test('rejects an unparseable endsAt as invalid, not as a past time', () => {
+    for (const endsAt of ['next tuesday', '', undefined]) {
+        const r = validateScheduleInput(
+            { kind: 'autorenew', action: 'extend', clientId: 'aa:bb:cc', endsAt },
+            NOW
+        );
+        assert.strictEqual(r.ok, false);
+        assert.match(r.error, /endsAt/i, `endsAt ${JSON.stringify(endsAt)}`);
+        assert.doesNotMatch(r.error, /past/i, `endsAt ${JSON.stringify(endsAt)}`);
+    }
+});
+
 test('requires endsAt on autorenew', () => {
     const r = validateScheduleInput({ kind: 'autorenew', action: 'extend', clientId: 'aa:bb:cc' }, NOW);
     assert.strictEqual(r.ok, false);

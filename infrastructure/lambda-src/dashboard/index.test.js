@@ -228,10 +228,17 @@ test('DELETE /schedules/{id} disables the row rather than deleting it', async ()
 
     const { input } = dynamoCalls[0];
     assert.deepStrictEqual(input.Key, { ScheduleID: 'sched-1' });
-    // Enabled is a DynamoDB reserved word — an un-aliased SET is a runtime error.
-    assert.ok(!/\bSET Enabled\b/.test(input.UpdateExpression), 'Enabled must be aliased');
+
+    // The clause must actually be IN the expression, not merely described by
+    // the names/values maps. Without this, dropping "#enabled = :false" from
+    // the string leaves both maps populated and every other assertion here
+    // still true: cancel returns 200, the row keeps Enabled=true, and the
+    // sweeper fires the "cancelled" revoke at a live client on its next tick.
+    assert.match(input.UpdateExpression, /#enabled\s*=\s*:false/);
     assert.strictEqual(input.ExpressionAttributeNames['#enabled'], 'Enabled');
     assert.strictEqual(input.ExpressionAttributeValues[':false'], false);
+    // Aliased for consistency with the sweeper (ENABLED is not itself reserved).
+    assert.ok(!/\bSET Enabled\b/.test(input.UpdateExpression), 'Enabled must be aliased');
     // UpdateItem upserts: without this, cancelling an unknown id creates a row
     // with no Kind — the corrupt shape the sweeper alarms on.
     assert.match(input.ConditionExpression, /attribute_exists/);
