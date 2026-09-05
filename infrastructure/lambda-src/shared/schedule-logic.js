@@ -18,7 +18,18 @@ function newScheduleId() {
     return randomUUID();
 }
 
-/** DynamoDB Scan filter for rows that are enabled and due. */
+/** Epoch ms for an ISO string, or null if absent/unparseable. */
+function parseMs(iso) {
+    const ms = new Date(iso ?? '').getTime();
+    return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * DynamoDB Scan filter for rows that are enabled and due.
+ *
+ * `:true` is a native JS boolean, so this is built for the DocumentClient. A
+ * caller on the low-level client must marshall it ({BOOL: true} / {S: nowIso}).
+ */
 function dueFilter(nowIso) {
     return {
         FilterExpression: '#enabled = :true AND #next <= :now',
@@ -35,41 +46,55 @@ function dueFilter(nowIso) {
  * @returns {{disable: boolean, nextRunAt: string|null, spawnRevokeAt: string|null, failureCount: number}}
  */
 function advanceSchedule(schedule, outcome, nowIso, leadDays) {
-    const prior = Number(schedule.FailureCount ?? 0);
+    const raw = Number(schedule.FailureCount ?? 0);
+    // Junk in FailureCount would otherwise write NaN back and jam the cap.
+    const prior = Number.isFinite(raw) ? raw : 0;
 
-    if (!outcome.ok) {
+    // Leave NextRunAt in the past so the next tick retries, until the cap.
+    const retry = () => {
         const failureCount = prior + 1;
-        // Leave NextRunAt in the past so the next tick retries, until the cap.
         return {
             disable: failureCount >= MAX_CONSECUTIVE_FAILURES,
             nextRunAt: null,
             spawnRevokeAt: null,
             failureCount,
         };
-    }
+    };
+    const stop = (spawnRevokeAt = null) =>
+        ({ disable: true, nextRunAt: null, spawnRevokeAt, failureCount: 0 });
 
-    if (schedule.Kind === 'once') {
-        return { disable: true, nextRunAt: null, spawnRevokeAt: null, failureCount: 0 };
-    }
+    if (!outcome.ok) return retry();
 
-    // autorenew
-    const endsAt = new Date(schedule.EndsAt).getTime();
+    if (schedule.Kind === 'once') return stop();
+
+    // Anything but a known kind fails closed rather than renewing on forever.
+    if (schedule.Kind !== 'autorenew') return stop();
+
+    // EndsAt is mandatory for autorenew: it is the only bound on renewal. A
+    // missing or malformed one must stop the row, never renew unbounded.
+    const endsAt = parseMs(schedule.EndsAt);
+    if (endsAt === null) return stop();
 
     if (new Date(nowIso).getTime() >= endsAt) {
-        return { disable: true, nextRunAt: null, spawnRevokeAt: null, failureCount: 0 };
+        // We just extended a device whose window is already over (retries ran
+        // long, or EndsAt was shortened). Cut it off instead of leaving it
+        // authorized with nothing scheduled to revoke it. EndsAt is in the past
+        // here, so the sweeper picks the spawned row up on its next pass.
+        return stop(new Date(endsAt).toISOString());
     }
 
-    const nextRunMs = new Date(outcome.newExpiration).getTime() - leadDays * DAY_MS;
+    // A successful extend with no usable expiry cannot be turned into a next
+    // run. Retrying self-limits at the cap; throwing here would lose the
+    // decision after Meraki already acted and re-extend every sweep.
+    const newExpirationMs = parseMs(outcome.newExpiration);
+    if (newExpirationMs === null) return retry();
+
+    const nextRunMs = newExpirationMs - leadDays * DAY_MS;
 
     if (nextRunMs >= endsAt) {
         // This renewal overshoots the end date. Let it stand so the device keeps
         // working, and hand EndsAt to a one-off revoke so it goes off on time.
-        return {
-            disable: true,
-            nextRunAt: null,
-            spawnRevokeAt: new Date(endsAt).toISOString(),
-            failureCount: 0,
-        };
+        return stop(new Date(endsAt).toISOString());
     }
 
     return {
