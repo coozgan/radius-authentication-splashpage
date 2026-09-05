@@ -97,8 +97,17 @@ resource "aws_cloudwatch_log_group" "dashboard_lambda_logs" {
 
 data "archive_file" "dashboard_lambda_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/lambda-src/dashboard"
   output_path = "${path.module}/.terraform/dashboard-lambda-package.zip"
+
+  source {
+    content  = file("${path.module}/lambda-src/dashboard/index.js")
+    filename = "index.js"
+  }
+
+  source {
+    content  = file("${path.module}/lambda-src/shared/meraki.js")
+    filename = "shared/meraki.js"
+  }
 }
 
 resource "aws_lambda_function" "dashboard_api" {
