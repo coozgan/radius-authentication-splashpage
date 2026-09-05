@@ -47,3 +47,8 @@ output "meraki_secret_arn" {
   description = "Secrets Manager ARN — set the API key value with: aws secretsmanager put-secret-value --secret-id <arn> --secret-string '{\"api_key\":\"YOUR_KEY\"}'"
   value       = aws_secretsmanager_secret.meraki_api_key.arn
 }
+
+output "schedules_table_name" {
+  description = "DynamoDB table holding scheduled authorization actions"
+  value       = aws_dynamodb_table.schedules.name
+}

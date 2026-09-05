@@ -57,3 +57,15 @@ variable "ssid_map" {
   type        = string
   default     = "{\"ICS-Staff\":\"1\",\"ICS-HS\":\"7\"}"
 }
+
+variable "schedules_table_name" {
+  description = "DynamoDB table name for scheduled authorization actions"
+  type        = string
+  default     = "radius-auth-schedules"
+}
+
+variable "autorenew_lead_days" {
+  description = "How many days before expiry an autorenew schedule fires. Primarily retry headroom — a larger value gives more sweeper ticks to recover from an outage before a user is affected."
+  type        = number
+  default     = 7
+}

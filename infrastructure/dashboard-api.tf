@@ -55,6 +55,17 @@ resource "aws_iam_policy" "dashboard_lambda_dynamodb" {
           "dynamodb:DeleteItem",
         ]
         Resource = aws_dynamodb_table.client_tracking.arn
+      },
+      {
+        Sid    = "SchedulesTableReadWrite"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Scan",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:PutItem",
+        ]
+        Resource = aws_dynamodb_table.schedules.arn
       }
     ]
   })
@@ -121,12 +132,13 @@ resource "aws_lambda_function" "dashboard_api" {
   runtime          = "nodejs18.x"
   architectures    = ["arm64"] # Graviton2 — same performance, lower cost
   role             = aws_iam_role.dashboard_lambda_role.arn
-  timeout          = 30         # Meraki API calls can take several seconds under load
+  timeout          = 30 # Meraki API calls can take several seconds under load
   memory_size      = 128
 
   environment {
     variables = {
       DYNAMODB_TABLE_NAME                 = aws_dynamodb_table.client_tracking.name
+      SCHEDULES_TABLE_NAME                = aws_dynamodb_table.schedules.name
       MERAKI_SECRET_ARN                   = aws_secretsmanager_secret.meraki_api_key.arn
       MERAKI_NETWORK_ID                   = var.meraki_network_id
       SSID_MAP                            = var.ssid_map
