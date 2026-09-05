@@ -4,7 +4,7 @@
 # ...but not the manifest: the blanket *.json above is aimed at log dumps
 # (lambda_log.json, webhook_log.json) and was also hiding package.json, so the
 # `npm test` entrypoint could never be committed.
-!package.json
+!/package.json
 webhook_log.txt
 lambda_log.json
 webhook_log.json
