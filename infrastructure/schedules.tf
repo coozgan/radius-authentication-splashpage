@@ -109,8 +109,13 @@ resource "aws_cloudwatch_metric_alarm" "sweeper_errors" {
   statistic           = "Sum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
-  alarm_description   = "The schedule sweeper is throwing — scheduled renewals and revokes may not be running."
-  alarm_actions       = var.dlq_alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
+  # Scoped deliberately: this metric only sees a failure of the handler ITSELF —
+  # bad config, a throw from findDue (the Scan), or a timeout. Per-row failures
+  # are caught inside pooled(), so the handler resolves and this stays 0 even
+  # when every row failed. A green sweeper-errors alarm is NOT evidence that
+  # rows are running: that is what the three token alarms below are for.
+  alarm_description = "The schedule sweeper handler itself failed (bad config, a throw from the schedules Scan, or a 300s timeout) — the whole sweep did not run. Per-row failures do NOT appear here; see the -failure-cap and -persist-failed alarms for those."
+  alarm_actions     = var.dlq_alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
 
   dimensions = {
     FunctionName = aws_lambda_function.schedule_sweeper.function_name
@@ -180,6 +185,39 @@ resource "aws_cloudwatch_metric_alarm" "sweeper_failure_cap" {
   alarm_actions       = var.dlq_alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
 }
 
+# A row whose decision could not be written back to DynamoDB. This is the most
+# likely first-apply failure (a missing IAM action or table), and it is
+# structurally invisible to all three alarms above: runOne's rethrow is swallowed
+# by pooled() so AWS/Lambda Errors stays 0; FailureCount cannot advance because
+# the write that would advance it is the one that failed, so the cap never fires;
+# and nothing was persisted, so the unexpected-stop check has nothing to see.
+resource "aws_cloudwatch_log_metric_filter" "sweeper_persist_failed" {
+  name           = "${var.project}-schedule-persist-failed"
+  log_group_name = aws_cloudwatch_log_group.sweeper_logs.name
+  pattern        = "SCHEDULE_PERSIST_FAILED"
+
+  metric_transformation {
+    name          = "SchedulePersistFailed"
+    namespace     = "${var.project}/Schedules"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "sweeper_persist_failed" {
+  alarm_name          = "${var.project}-schedule-persist-failed"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = aws_cloudwatch_log_metric_filter.sweeper_persist_failed.metric_transformation[0].name
+  namespace           = aws_cloudwatch_log_metric_filter.sweeper_persist_failed.metric_transformation[0].namespace
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_description   = "The sweeper cannot write its decisions to DynamoDB (most likely a missing IAM policy action or a missing/renamed schedules table). Affected rows stay due forever: they re-fire against the Meraki API every 5 minutes without ever advancing NextRunAt or reaching the failure cap. No other alarm can see this."
+  alarm_actions       = var.dlq_alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
+}
+
 # ── Lambda ────────────────────────────────────────────────
 
 # Filenames MUST preserve the lambda-src/ layout: index.js resolves its imports
@@ -216,6 +254,17 @@ resource "aws_lambda_function" "schedule_sweeper" {
   role             = aws_iam_role.sweeper_lambda_role.arn
   timeout          = 300 # a sweep may touch many clients, each a Meraki round-trip
   memory_size      = 256
+
+  # EventBridge scheduled rules are at-least-once, and the 300s timeout exactly
+  # equals the 5-minute tick, so a slow sweep can overlap the next one. findDue
+  # Scans with no lease, so two concurrent sweeps see the same due set and both
+  # call Meraki — double-counting RunCount and possibly double-advancing an
+  # extend's expiry, i.e. over-granting access. This closes the overlapping-
+  # invocation case; it does NOT make an individual row's action idempotent.
+  # ponytail: for true idempotency add ConditionExpression 'NextRunAt = :expected'
+  # to the parent update in applyDecision, carrying the value read during the
+  # Scan, so a losing racer fails its condition instead of writing.
+  reserved_concurrent_executions = 1
 
   environment {
     variables = {

@@ -23,11 +23,18 @@ const sdkExports = new Proxy({}, {
 
 // Recorded dynamo traffic: one entry per send, in call order.
 const sends = [];
+// Recorded setAuthorization arguments as [clientId, authorized] tuples. The
+// extend-vs-revoke flag is the one expression deciding whether a row authorizes
+// or deauthorizes a real device, so the stub must observe it, not just its return.
+const authCalls = [];
 let sendImpl = async () => ({});
 let setAuthorizationImpl = async () => ({ newExpiration: '2027-01-01T00:00:00.000Z' });
 
 const merakiStub = {
-    setAuthorization: (...args) => setAuthorizationImpl(...args),
+    setAuthorization: (...args) => {
+        authCalls.push(args);
+        return setAuthorizationImpl(...args);
+    },
     dynamo: {
         send: async cmd => {
             sends.push(cmd);
@@ -52,7 +59,7 @@ try {
 
 const {
     revokeScheduleId, isUnexpectedStop, buildScheduleUpdate,
-    applyDecision, runOne, pooled, STOPPED_TOKEN, CAP_TOKEN,
+    applyDecision, runOne, pooled, STOPPED_TOKEN, CAP_TOKEN, PERSIST_TOKEN,
 } = sweeper;
 
 const NOW = '2026-09-05T00:00:00.000Z';
@@ -73,6 +80,7 @@ async function captureConsole(level, fn) {
 
 test.beforeEach(() => {
     sends.length = 0;
+    authCalls.length = 0;
     sendImpl = async () => ({});
     setAuthorizationImpl = async () => ({ newExpiration: '2027-01-01T00:00:00.000Z' });
 });
@@ -219,6 +227,104 @@ test('a failed persist is logged with the schedule id before it rethrows', async
     assert.ok(line.includes('sched-persist'));
 });
 
+test('a failed persist emits SCHEDULE_PERSIST_FAILED', async () => {
+    // pooled() swallows this rethrow, so the handler resolves and AWS/Lambda
+    // Errors stays 0. Without the token nothing observes the row re-firing
+    // against Meraki every 5 minutes forever.
+    sendImpl = async () => { throw new Error('AccessDeniedException'); };
+
+    const errors = await captureConsole('error', async () => {
+        await assert.rejects(() => runOne(
+            { ScheduleID: 'sched-persist', ClientID: 'aa:bb:cc', Kind: 'once', Action: 'revoke' },
+            NOW
+        ), 'runOne must still rethrow so the row counts as failed');
+    });
+
+    const line = errors.find(l => l.includes(PERSIST_TOKEN));
+    assert.ok(line, `expected ${PERSIST_TOKEN}; got ${JSON.stringify(errors)}`);
+    assert.ok(line.includes('sched-persist'));
+    assert.match(line, /AccessDeniedException/, 'the cause is what makes it diagnosable');
+    assert.strictEqual(PERSIST_TOKEN, 'SCHEDULE_PERSIST_FAILED',
+        'token is grepped by aws_cloudwatch_log_metric_filter.sweeper_persist_failed');
+});
+
+// ── I1: the extend-vs-revoke dispatch ─────────────────────────────────────────
+
+test('an extend row authorizes the client; a revoke row deauthorizes it', async () => {
+    await runOne({ ScheduleID: 's-ext', ClientID: 'aa:bb:cc', Kind: 'once', Action: 'extend' }, NOW);
+    assert.deepStrictEqual(authCalls, [['aa:bb:cc', true]],
+        'Action "extend" must call setAuthorization(clientId, true)');
+
+    authCalls.length = 0;
+    await runOne({ ScheduleID: 's-rev', ClientID: 'dd:ee:ff', Kind: 'once', Action: 'revoke' }, NOW);
+    assert.deepStrictEqual(authCalls, [['dd:ee:ff', false]],
+        'Action "revoke" must call setAuthorization(clientId, false) — inverting this ' +
+        'mass-deauthorizes every autorenew client on the next tick');
+});
+
+test('any non-extend Action deauthorizes — the flag is not a truthiness check', async () => {
+    // A corrupt or renamed Action must fail safe (no authorization), never
+    // authorize by accident.
+    for (const Action of ['Extend', 'EXTEND', 'renew', undefined]) {
+        authCalls.length = 0;
+        await runOne({ ScheduleID: 's-x', ClientID: 'aa:bb:cc', Kind: 'once', Action }, NOW);
+        assert.deepStrictEqual(authCalls, [['aa:bb:cc', false]],
+            `Action ${JSON.stringify(Action)} must not authorize`);
+    }
+});
+
+// ── m2: a spawned revoke is never resurrected ─────────────────────────────────
+
+test('m2: a revoke row that already exists is a success, not a failure', async () => {
+    // Parent Update failed after the Put landed last sweep; this sweep re-Puts.
+    // The condition rejects, and that must not surface as a failure or stop the
+    // parent's update — re-Putting would reset Enabled/RunCount on a row that
+    // may already have fired.
+    sendImpl = async cmd => {
+        if (cmd.constructor.name === 'PutCommand') {
+            const e = new Error('The conditional request failed');
+            e.name = 'ConditionalCheckFailedException';
+            throw e;
+        }
+        return {};
+    };
+
+    await applyDecision(
+        { ScheduleID: 'parent-1', ClientID: 'aa:bb:cc' },
+        { disable: true, nextRunAt: null, spawnRevokeAt: '2026-12-01T00:00:00.000Z', failureCount: 0 },
+        okOutcome,
+        NOW
+    );
+
+    assert.deepStrictEqual(sends.map(s => s.constructor.name), ['PutCommand', 'UpdateCommand'],
+        'the parent update must still be attempted after the conditional Put fails');
+    assert.strictEqual(sends[1].input.Key.ScheduleID, 'parent-1');
+});
+
+test('m2: the spawn Put is conditional on the row not already existing', async () => {
+    await applyDecision(
+        { ScheduleID: 'parent-1', ClientID: 'aa:bb:cc' },
+        { disable: true, nextRunAt: null, spawnRevokeAt: '2026-12-01T00:00:00.000Z', failureCount: 0 },
+        okOutcome,
+        NOW
+    );
+    assert.strictEqual(sends[0].input.ConditionExpression, 'attribute_not_exists(ScheduleID)');
+});
+
+test('m2: a non-conditional Put failure still propagates', async () => {
+    sendImpl = async cmd => {
+        if (cmd.constructor.name === 'PutCommand') throw new Error('ProvisionedThroughputExceeded');
+        return {};
+    };
+
+    await assert.rejects(() => applyDecision(
+        { ScheduleID: 'parent-1', ClientID: 'aa:bb:cc' },
+        { disable: true, nextRunAt: null, spawnRevokeAt: '2026-12-01T00:00:00.000Z', failureCount: 0 },
+        okOutcome,
+        NOW
+    ), /ProvisionedThroughputExceeded/, 'only ConditionalCheckFailedException is swallowed');
+});
+
 // ── Concurrency bound ─────────────────────────────────────────────────────────
 
 test('pooled never exceeds its concurrency limit and preserves order', async () => {
@@ -278,6 +384,21 @@ test('a real nextRunAt is written via a name placeholder (NextRunAt is reserved-
     assert.ok(upd.UpdateExpression.includes('#next = :next'));
     assert.strictEqual(upd.ExpressionAttributeNames['#next'], 'NextRunAt');
     assert.strictEqual(upd.ExpressionAttributeValues[':next'], '2026-10-01T00:00:00.000Z');
+});
+
+test('the ADD clause is space-separated from SET, never comma-separated', () => {
+    // A comma before ADD is a runtime-only ValidationException: the sweep fails
+    // on every row and nothing catches it until production. Checked on the
+    // widest expression (every optional SET present) so a regression anywhere in
+    // the clause list is caught.
+    const upd = buildScheduleUpdate(
+        { disable: true, nextRunAt: '2026-10-01T00:00:00.000Z', spawnRevokeAt: null, failureCount: 2 },
+        { ok: false, error: 'boom' },
+        NOW
+    );
+    assert.doesNotMatch(upd.UpdateExpression, /,\s*ADD\b/,
+        `SET and ADD are space-separated in DynamoDB: ${upd.UpdateExpression}`);
+    assert.match(upd.UpdateExpression, /\bADD RunCount :one\b/);
 });
 
 test('disable writes Enabled = false', () => {

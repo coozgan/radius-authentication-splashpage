@@ -23,6 +23,7 @@ const LEAD_DAYS = Number(process.env.AUTORENEW_LEAD_DAYS || 7);
 // pin both tokens for that reason.
 const STOPPED_TOKEN = 'SCHEDULE_STOPPED_UNEXPECTED';
 const CAP_TOKEN = 'SCHEDULE_FAILURE_CAP_REACHED';
+const PERSIST_TOKEN = 'SCHEDULE_PERSIST_FAILED';
 
 // Each row costs a GetItem + a Meraki PUT + an UpdateItem, so in-flight rows
 // map roughly 1:1 to Meraki requests. Meraki allows ~10 req/s per org; 4 keeps
@@ -106,22 +107,35 @@ async function applyDecision(schedule, decision, outcome, nowIso) {
     // nothing left to revoke the device. A duplicate revoke is harmless, a
     // missing one leaves a device authorized forever.
     if (decision.spawnRevokeAt) {
-        await dynamo.send(new PutCommand({
-            TableName: SCHEDULES_TABLE,
-            Item: {
-                ScheduleID: revokeScheduleId(schedule.ScheduleID, decision.spawnRevokeAt),
-                Kind: 'once',
-                Action: 'revoke',
-                ClientID: schedule.ClientID,
-                NextRunAt: decision.spawnRevokeAt,
-                Enabled: true,
-                RunCount: 0,
-                FailureCount: 0,
-                CreatedAt: nowIso,
-                Note: `Auto-created: enforces EndsAt of schedule ${schedule.ScheduleID}`,
-            },
-        }));
-        console.log(`Spawned EndsAt revoke for ${schedule.ClientID} at ${decision.spawnRevokeAt}`);
+        try {
+            await dynamo.send(new PutCommand({
+                TableName: SCHEDULES_TABLE,
+                // revokeScheduleId is deterministic and Put replaces, so a resweep
+                // after the parent's Update failed would otherwise reset Enabled and
+                // RunCount on a revoke row that may already have fired. The row
+                // already existing IS the success case.
+                ConditionExpression: 'attribute_not_exists(ScheduleID)',
+                Item: {
+                    ScheduleID: revokeScheduleId(schedule.ScheduleID, decision.spawnRevokeAt),
+                    Kind: 'once',
+                    Action: 'revoke',
+                    ClientID: schedule.ClientID,
+                    NextRunAt: decision.spawnRevokeAt,
+                    Enabled: true,
+                    RunCount: 0,
+                    FailureCount: 0,
+                    CreatedAt: nowIso,
+                    Note: `Auto-created: enforces EndsAt of schedule ${schedule.ScheduleID}`,
+                },
+            }));
+            console.log(`Spawned EndsAt revoke for ${schedule.ClientID} at ${decision.spawnRevokeAt}`);
+        } catch (e) {
+            if (e.name !== 'ConditionalCheckFailedException') throw e;
+            console.log(
+                `EndsAt revoke for ${schedule.ClientID} at ${decision.spawnRevokeAt} already exists — ` +
+                'leaving it as-is'
+            );
+        }
     }
 
     const { ExpressionAttributeNames, ...rest } = buildScheduleUpdate(decision, outcome, nowIso);
@@ -178,12 +192,15 @@ async function runOne(schedule, nowIso) {
     // Deliberately outside the try above: a throw here means the decision was
     // never persisted, so FailureCount does not advance and the row re-fires
     // every sweep uncapped. The cause is a persistent DynamoDB/IAM fault that
-    // this layer cannot recover from — but it must not be silent.
+    // this layer cannot recover from — but it must not be silent. The rethrow
+    // is swallowed by pooled(), so the handler resolves and the Lambda Errors
+    // metric stays 0: this token is the sole signal.
     try {
         await applyDecision(schedule, decision, outcome, nowIso);
     } catch (e) {
         console.error(
-            `Schedule ${schedule.ScheduleID} (client ${schedule.ClientID}) decision not persisted: ` +
+            `${PERSIST_TOKEN} schedule ${schedule.ScheduleID} (client ${schedule.ClientID}) ` +
+            `decision not persisted: ` +
             `${e.message} — row will re-fire next sweep without advancing FailureCount`
         );
         throw e;
@@ -240,3 +257,4 @@ module.exports.runOne = runOne;
 module.exports.pooled = pooled;
 module.exports.STOPPED_TOKEN = STOPPED_TOKEN;
 module.exports.CAP_TOKEN = CAP_TOKEN;
+module.exports.PERSIST_TOKEN = PERSIST_TOKEN;

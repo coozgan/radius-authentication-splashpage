@@ -177,14 +177,14 @@ resource "aws_apigatewayv2_api" "dashboard" {
   protocol_type = "HTTP"
   description   = "HTTP API for the WiFi client dashboard"
 
-  cors_configuration {
-    allow_origins = ["*"] # Restrict to your dashboard domain in production
-    # DELETE was missing: the browser preflight for DELETE /schedules/{id} (and
-    # the pre-existing DELETE /clients/{id}) fails without it.
-    allow_methods = ["GET", "POST", "DELETE", "OPTIONS"]
-    allow_headers = ["Content-Type"]
-    max_age       = 3600
-  }
+  # No cors_configuration, deliberately. The dashboard calls this API
+  # exclusively from Next.js server actions ('use server') running inside the
+  # Cloudflare Worker; those are server-to-server requests, send no Origin, and
+  # are not subject to CORS. An allow_origins of "*" on an unauthenticated API
+  # whose routes include bulk-revoke would let any page a staff member visits
+  # issue a network-wide deauthorization from their browser and read the result.
+  # A browser-origin consumer added later must add this block back with an
+  # explicit allow_origins naming that origin — never "*".
 }
 
 resource "aws_apigatewayv2_stage" "dashboard_default" {

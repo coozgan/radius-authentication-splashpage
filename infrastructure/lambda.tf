@@ -7,11 +7,19 @@
 # are retried — not the entire batch.
 # ============================================================
 
-# Zip the lambda-src directory on every plan/apply
+# index.js only. A source_dir of lambda-src/ would sweep in dashboard/, sweeper/,
+# shared/ and every *.test.js file, so any edit to the scheduling feature would
+# change source_code_hash here and redeploy this unrelated production Lambda.
+# This handler requires nothing outside the AWS SDK, so one file is the whole
+# package. filename mirrors the repo tree — handler = "index.handler".
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/lambda-src"
   output_path = "${path.module}/.terraform/lambda-package.zip"
+
+  source {
+    content  = file("${path.module}/lambda-src/index.js")
+    filename = "index.js"
+  }
 }
 
 resource "aws_lambda_function" "client_tracker" {
