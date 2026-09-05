@@ -13,7 +13,12 @@ const load = Module._load;
 Module._load = (request, ...rest) =>
     request.startsWith('@aws-sdk/') ? stubExports : load(request, ...rest);
 
-const { merakiUtcToSGT } = require('./meraki');
+let merakiUtcToSGT;
+try {
+    ({ merakiUtcToSGT } = require('./meraki'));
+} finally {
+    Module._load = load; // process-global patch; never leave it installed
+}
 
 test('merakiUtcToSGT converts Meraki UTC format to SGT ISO 8601', () => {
     assert.strictEqual(

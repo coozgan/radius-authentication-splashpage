@@ -101,7 +101,7 @@ data "archive_file" "dashboard_lambda_zip" {
 
   source {
     content  = file("${path.module}/lambda-src/dashboard/index.js")
-    filename = "index.js"
+    filename = "dashboard/index.js"
   }
 
   source {
@@ -115,7 +115,7 @@ resource "aws_lambda_function" "dashboard_api" {
   description      = "Dashboard API: list clients, extend single/bulk Meraki splash authorizations"
   filename         = data.archive_file.dashboard_lambda_zip.output_path
   source_code_hash = data.archive_file.dashboard_lambda_zip.output_base64sha256
-  handler          = "index.handler"
+  handler          = "dashboard/index.handler"
   runtime          = "nodejs18.x"
   architectures    = ["arm64"] # Graviton2 — same performance, lower cost
   role             = aws_iam_role.dashboard_lambda_role.arn
