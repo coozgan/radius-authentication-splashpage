@@ -5,6 +5,8 @@
 #   GET    /clients                      — list all clients (DynamoDB Scan)
 #   POST   /clients/{clientId}/extend    — extend one client (Meraki + DynamoDB)
 #   POST   /clients/bulk-extend          — extend many clients in parallel
+#   POST   /clients/{clientId}/revoke    — revoke one client's authorization
+#   POST   /clients/bulk-revoke          — revoke many clients in parallel
 #   DELETE /clients/{clientId}           — delete one client record
 #   POST   /clients/bulk-delete          — delete many client records
 #

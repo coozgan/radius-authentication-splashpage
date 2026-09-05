@@ -4,6 +4,14 @@
  * Dashboard API — Lambda Handler (routing only).
  * Business logic lives in ../shared/meraki.js, shared with the sweeper so
  * scheduled and manual actions cannot drift apart.
+ *
+ *   GET    /clients                      — list all clients (DynamoDB Scan)
+ *   POST   /clients/{clientId}/extend    — extend one client (Meraki + DynamoDB)
+ *   POST   /clients/bulk-extend          — extend many clients in parallel
+ *   POST   /clients/{clientId}/revoke    — revoke one client's authorization
+ *   POST   /clients/bulk-revoke          — revoke many clients in parallel
+ *   DELETE /clients/{clientId}           — delete one client record
+ *   POST   /clients/bulk-delete          — delete many client records
  */
 
 const {
@@ -53,6 +61,14 @@ exports.handler = async (event) => {
             return ok({ success: true, ...result });
         }
 
+        // ── POST /clients/{clientId}/revoke ───────────────────────────────────
+        const revokeMatch = rawPath.match(/^\/clients\/(.+)\/revoke$/);
+        if (method === 'POST' && revokeMatch) {
+            const clientId = decodeURIComponent(revokeMatch[1]);
+            const result   = await setAuthorization(clientId, false);
+            return ok({ success: true, ...result });
+        }
+
         // ── POST /clients/bulk-extend ─────────────────────────────────────────
         if (method === 'POST' && rawPath === '/clients/bulk-extend') {
             const body = typeof event.body === 'string'
@@ -80,6 +96,36 @@ exports.handler = async (event) => {
             });
 
             console.log(`Bulk extend complete: ${succeeded.length} OK, ${failed.length} failed`);
+            return ok({ succeeded, failed });
+        }
+
+        // ── POST /clients/bulk-revoke ─────────────────────────────────────────
+        if (method === 'POST' && rawPath === '/clients/bulk-revoke') {
+            const body = typeof event.body === 'string'
+                ? JSON.parse(event.body)
+                : (event.body ?? {});
+
+            const { clientIds } = body;
+            if (!Array.isArray(clientIds) || clientIds.length === 0) {
+                return clientError('clientIds must be a non-empty array');
+            }
+
+            console.log(`Bulk revoking ${clientIds.length} client(s)`);
+
+            const results   = await Promise.allSettled(clientIds.map(id => setAuthorization(id, false)));
+            const succeeded = [];
+            const failed    = [];
+
+            results.forEach((r, i) => {
+                if (r.status === 'fulfilled') {
+                    succeeded.push(r.value);
+                } else {
+                    console.error(`Failed to revoke ${clientIds[i]}: ${r.reason?.message}`);
+                    failed.push({ clientId: clientIds[i], error: r.reason?.message ?? 'Unknown error' });
+                }
+            });
+
+            console.log(`Bulk revoke complete: ${succeeded.length} OK, ${failed.length} failed`);
             return ok({ succeeded, failed });
         }
 
