@@ -9,6 +9,9 @@
 #   POST   /clients/bulk-revoke          — revoke many clients in parallel
 #   DELETE /clients/{clientId}           — delete one client record
 #   POST   /clients/bulk-delete          — delete many client records
+#   GET    /schedules                    — list all schedules (DynamoDB Scan)
+#   POST   /schedules                    — create a validated schedule
+#   DELETE /schedules/{scheduleId}       — cancel a schedule (disable, never delete)
 #
 # The Meraki API key is retrieved from Secrets Manager at runtime,
 # so it never appears in Lambda env vars or Terraform state.
@@ -121,6 +124,19 @@ data "archive_file" "dashboard_lambda_zip" {
     content  = file("${path.module}/lambda-src/shared/meraki.js")
     filename = "shared/meraki.js"
   }
+
+  # Required by shared/validate-schedule.js (newScheduleId). The zip layout
+  # mirrors the repo tree — a missing source block here is MODULE_NOT_FOUND on
+  # every cold start, i.e. a total outage of the dashboard API.
+  source {
+    content  = file("${path.module}/lambda-src/shared/schedule-logic.js")
+    filename = "shared/schedule-logic.js"
+  }
+
+  source {
+    content  = file("${path.module}/lambda-src/shared/validate-schedule.js")
+    filename = "shared/validate-schedule.js"
+  }
 }
 
 resource "aws_lambda_function" "dashboard_api" {
@@ -163,7 +179,9 @@ resource "aws_apigatewayv2_api" "dashboard" {
 
   cors_configuration {
     allow_origins = ["*"] # Restrict to your dashboard domain in production
-    allow_methods = ["GET", "POST", "OPTIONS"]
+    # DELETE was missing: the browser preflight for DELETE /schedules/{id} (and
+    # the pre-existing DELETE /clients/{id}) fails without it.
+    allow_methods = ["GET", "POST", "DELETE", "OPTIONS"]
     allow_headers = ["Content-Type"]
     max_age       = 3600
   }

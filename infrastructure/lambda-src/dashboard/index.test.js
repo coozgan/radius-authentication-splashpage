@@ -11,6 +11,11 @@ const Module = require('node:module');
 const calls = [];
 let setAuthorizationImpl = async clientId => ({ clientId, revokedAt: '2026-09-05T10:00:00.000Z' });
 
+// Every dynamo.send() the handler makes, as {type, input} — the schedule routes
+// are pure DynamoDB, so this is the only way to see what they would write.
+const dynamoCalls = [];
+let dynamoImpl = async () => ({});
+
 const stub = {
     setAuthorization: async (clientId, authorized) => {
         calls.push({ clientId, authorized });
@@ -18,11 +23,25 @@ const stub = {
     },
     getAllClients: async () => [],
     deleteOne:     async () => {},
+    dynamo: {
+        send: async (cmd) => {
+            dynamoCalls.push({ type: cmd.constructor.name, input: cmd.input });
+            return dynamoImpl(cmd);
+        },
+    },
 };
 
+// @aws-sdk/* is provided by the Lambda runtime, not package.json. Each command
+// keeps its input and its class name so assertions can read both.
+const command = name => ({ [name]: class { constructor(input) { this.input = input; } } })[name];
+const sdkStub = { ScanCommand: command('ScanCommand'), PutCommand: command('PutCommand'), UpdateCommand: command('UpdateCommand') };
+
 const load = Module._load;
-Module._load = (request, ...rest) =>
-    request.endsWith('shared/meraki') ? stub : load(request, ...rest);
+Module._load = (request, ...rest) => {
+    if (request.endsWith('shared/meraki')) return stub;
+    if (request.startsWith('@aws-sdk/')) return sdkStub;
+    return load(request, ...rest);
+};
 
 let handler;
 try {
@@ -39,7 +58,9 @@ const evt = (method, rawPath, body) => ({
 
 test.beforeEach(() => {
     calls.length = 0;
+    dynamoCalls.length = 0;
     setAuthorizationImpl = async clientId => ({ clientId, revokedAt: '2026-09-05T10:00:00.000Z' });
+    dynamoImpl = async () => ({});
 });
 
 test('POST /clients/{id}/revoke deauthorizes and returns the success envelope', async () => {
@@ -117,4 +138,113 @@ test('the extend routes still work alongside revoke', async () => {
     assert.deepStrictEqual(JSON.parse(res.body), {
         success: true, clientId: 'abc123', newExpiration: 'x', lastRenewed: 'y',
     });
+});
+
+// ── Schedule routes ───────────────────────────────────────────────────────────
+
+const FUTURE = '2099-01-01T00:00:00.000Z';
+const validPost = over => ({
+    kind: 'once', action: 'revoke', clientId: 'aa:bb:cc', runAt: FUTURE, ...over,
+});
+
+test('POST /schedules stores the validated row and echoes it back', async () => {
+    const res = await handler(evt('POST', '/schedules', validPost()));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(dynamoCalls.length, 1);
+    assert.strictEqual(dynamoCalls[0].type, 'PutCommand');
+
+    const item = dynamoCalls[0].input.Item;
+    assert.strictEqual(item.Kind, 'once');
+    assert.strictEqual(item.Action, 'revoke');
+    assert.strictEqual(item.ClientID, 'aa:bb:cc');
+    assert.strictEqual(item.Enabled, true);
+    assert.strictEqual(item.NextRunAt, FUTURE);
+    assert.deepStrictEqual(JSON.parse(res.body), item);
+});
+
+test('POST /schedules rejects invalid input with a 400 and writes nothing', async () => {
+    const bad = [
+        validPost({ kind: 'policy' }),
+        validPost({ clientId: '' }),
+        validPost({ runAt: '2020-01-01T00:00:00.000Z' }),
+        validPost({ runAt: 'next tuesday' }),
+        { kind: 'autorenew', action: 'extend', clientId: 'aa:bb:cc' }, // no endsAt
+    ];
+    for (const body of bad) {
+        const res = await handler(evt('POST', '/schedules', body));
+        assert.strictEqual(res.statusCode, 400, `should reject ${JSON.stringify(body)}`);
+        assert.ok(JSON.parse(res.body).error);
+    }
+    assert.deepStrictEqual(dynamoCalls, [], 'no rejected body may reach DynamoDB');
+});
+
+test('POST /schedules answers malformed JSON with a 400, not a 500', async () => {
+    const res = await handler({
+        requestContext: { http: { method: 'POST' } }, rawPath: '/schedules', body: '{not json',
+    });
+    assert.strictEqual(res.statusCode, 400);
+    assert.deepStrictEqual(dynamoCalls, []);
+});
+
+test('a stored row satisfies the sweeper own due filter', async () => {
+    // Imported, not re-typed: this fails if the write and the filter ever drift.
+    const { dueFilter } = require('../shared/schedule-logic');
+
+    await handler(evt('POST', '/schedules', validPost()));
+    const item = dynamoCalls[0].input.Item;
+
+    const { ExpressionAttributeNames: names, ExpressionAttributeValues: vals } = dueFilter(FUTURE);
+    // FilterExpression is "#enabled = :true AND #next <= :now" — evaluate it
+    // against the row the way DynamoDB would.
+    assert.strictEqual(item[names['#enabled']], vals[':true'], 'Enabled must be a native boolean');
+    assert.ok(item[names['#next']] <= vals[':now'], 'NextRunAt must compare as a string');
+    assert.ok(item.NextRunAt.endsWith('Z'), 'a non-Z offset sorts wrongly against the filter');
+});
+
+test('GET /schedules pages the scan and returns newest first', async () => {
+    const rows = [
+        { ScheduleID: 'old', CreatedAt: '2026-01-01T00:00:00.000Z' },
+        { ScheduleID: 'new', CreatedAt: '2026-09-01T00:00:00.000Z' },
+    ];
+    let page = 0;
+    dynamoImpl = async () => (page++ === 0
+        ? { Items: [rows[0]], LastEvaluatedKey: { ScheduleID: 'old' } }
+        : { Items: [rows[1]] });
+
+    const res = await handler(evt('GET', '/schedules'));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(dynamoCalls.length, 2, 'must follow LastEvaluatedKey');
+    assert.deepStrictEqual(dynamoCalls[1].input.ExclusiveStartKey, { ScheduleID: 'old' });
+    assert.deepStrictEqual(JSON.parse(res.body).map(r => r.ScheduleID), ['new', 'old']);
+});
+
+test('DELETE /schedules/{id} disables the row rather than deleting it', async () => {
+    const res = await handler(evt('DELETE', '/schedules/sched-1'));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(dynamoCalls[0].type, 'UpdateCommand', 'cancel must not be a DeleteCommand');
+
+    const { input } = dynamoCalls[0];
+    assert.deepStrictEqual(input.Key, { ScheduleID: 'sched-1' });
+    // Enabled is a DynamoDB reserved word — an un-aliased SET is a runtime error.
+    assert.ok(!/\bSET Enabled\b/.test(input.UpdateExpression), 'Enabled must be aliased');
+    assert.strictEqual(input.ExpressionAttributeNames['#enabled'], 'Enabled');
+    assert.strictEqual(input.ExpressionAttributeValues[':false'], false);
+    // UpdateItem upserts: without this, cancelling an unknown id creates a row
+    // with no Kind — the corrupt shape the sweeper alarms on.
+    assert.match(input.ConditionExpression, /attribute_exists/);
+});
+
+test('DELETE /schedules/{id} URL-decodes the id and 404s an unknown one', async () => {
+    dynamoImpl = async () => {
+        const e = new Error('The conditional request failed');
+        e.name = 'ConditionalCheckFailedException';
+        throw e;
+    };
+
+    const res = await handler(evt('DELETE', '/schedules/a%2Fb'));
+    assert.strictEqual(dynamoCalls[0].input.Key.ScheduleID, 'a/b');
+    assert.strictEqual(res.statusCode, 404);
 });

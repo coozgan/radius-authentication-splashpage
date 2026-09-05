@@ -12,11 +12,18 @@
  *   POST   /clients/bulk-revoke          — revoke many clients in parallel
  *   DELETE /clients/{clientId}           — delete one client record
  *   POST   /clients/bulk-delete          — delete many client records
+ *   GET    /schedules                    — list all schedules (DynamoDB Scan)
+ *   POST   /schedules                    — create a validated schedule
+ *   DELETE /schedules/{scheduleId}       — cancel a schedule (disable, never delete)
  */
 
+const { ScanCommand, UpdateCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
 const {
-    setAuthorization, getAllClients, deleteOne,
+    setAuthorization, getAllClients, deleteOne, dynamo,
 } = require('../shared/meraki');
+const { validateScheduleInput } = require('../shared/validate-schedule');
+
+const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE_NAME;
 
 // ── HTTP response helpers ─────────────────────────────────────────────────────
 
@@ -166,6 +173,78 @@ exports.handler = async (event) => {
 
             console.log(`Bulk delete complete: ${succeeded.length} deleted, ${failed.length} failed`);
             return ok({ succeeded, failed });
+        }
+
+        // ── GET /schedules ────────────────────────────────────────────────────
+        if (method === 'GET' && rawPath === '/schedules') {
+            const items = [];
+            let lastKey;
+            do {
+                const resp = await dynamo.send(new ScanCommand({
+                    TableName: SCHEDULES_TABLE,
+                    ExclusiveStartKey: lastKey,
+                }));
+                if (resp.Items) items.push(...resp.Items);
+                lastKey = resp.LastEvaluatedKey;
+            } while (lastKey);
+
+            // Newest first — the list is a log of what someone set up.
+            items.sort((a, b) => String(b.CreatedAt ?? '').localeCompare(String(a.CreatedAt ?? '')));
+            return ok(items);
+        }
+
+        // ── POST /schedules ───────────────────────────────────────────────────
+        if (method === 'POST' && rawPath === '/schedules') {
+            let body;
+            try {
+                body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body ?? {});
+            } catch {
+                // Malformed JSON is a caller error, not a 500.
+                return clientError('body must be valid JSON');
+            }
+
+            // The trust boundary: nothing past this point re-checks the shape.
+            const result = validateScheduleInput(body, new Date().toISOString());
+            if (!result.ok) return clientError(result.error);
+
+            await dynamo.send(new PutCommand({
+                TableName: SCHEDULES_TABLE,
+                Item: result.item,
+            }));
+
+            console.log(`Created ${result.item.Kind} schedule ${result.item.ScheduleID} for ${result.item.ClientID}`);
+            return ok(result.item);
+        }
+
+        // ── DELETE /schedules/{scheduleId} ────────────────────────────────────
+        const scheduleMatch = rawPath.match(/^\/schedules\/([^/]+)$/);
+        if (method === 'DELETE' && scheduleMatch) {
+            const scheduleId = decodeURIComponent(scheduleMatch[1]);
+            // Cancel means disable — rows are never deleted, so the history of
+            // what was scheduled survives. Enabled=false takes the row out of
+            // the sweeper's due filter permanently; NextRunAt is left alone
+            // because nothing reads it once Enabled is false.
+            //
+            // The condition is what stops a cancel from *creating* a row:
+            // UpdateItem upserts, so cancelling an unknown id would otherwise
+            // write {ScheduleID, Enabled: false} — a row with no Kind, which is
+            // exactly the corrupt shape the sweeper alarms on.
+            try {
+                await dynamo.send(new UpdateCommand({
+                    TableName: SCHEDULES_TABLE,
+                    Key: { ScheduleID: scheduleId },
+                    UpdateExpression: 'SET #enabled = :false, LastResult = :res',
+                    ConditionExpression: 'attribute_exists(ScheduleID)',
+                    // Enabled is a DynamoDB reserved word.
+                    ExpressionAttributeNames: { '#enabled': 'Enabled' },
+                    ExpressionAttributeValues: { ':false': false, ':res': 'cancelled' },
+                }));
+            } catch (e) {
+                if (e.name === 'ConditionalCheckFailedException') return notFound();
+                throw e;
+            }
+            console.log(`Cancelled schedule: ${scheduleId}`);
+            return ok({ success: true, scheduleId });
         }
 
         return notFound();
