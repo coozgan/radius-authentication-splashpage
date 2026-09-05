@@ -106,6 +106,9 @@ test('revoke PUTs isAuthorized false and records the revoke', async () => {
     assert.deepStrictEqual(putBody(), { ssids: { 1: { isAuthorized: false } } });
     assert.strictEqual(fetches[0][1].method, 'PUT');
     assert.match(fetches[0][0], /networks\/N_123\/clients\/aa:bb:cc\/splashAuthorizationStatus$/);
+    // The Secrets Manager key must actually reach the request. Without this the
+    // whole getMerakiApiKey path is driven by the tests but observed by none.
+    assert.strictEqual(fetches[0][1].headers.Authorization, 'Bearer test-key');
 
     const expr = updateSent().input.UpdateExpression;
     for (const attr of ['ExpirationTimestamp', 'RevokedAt', 'LastUpdated']) {
