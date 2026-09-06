@@ -8,13 +8,18 @@ const Module = require('node:module');
 
 let secretValue = JSON.stringify({ api_key: 'correct-horse' });
 let sendCalls = 0;
+let sendThrows = null;   // set to an Error to make Secrets Manager fail
 
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
     if (request === '@aws-sdk/client-secrets-manager') {
         return {
             SecretsManagerClient: class {
-                async send() { sendCalls += 1; return { SecretString: secretValue }; }
+                async send() {
+                    sendCalls += 1;
+                    if (sendThrows) throw sendThrows;
+                    return { SecretString: secretValue };
+                }
             },
             GetSecretValueCommand: class { constructor(i) { this.input = i; } },
         };
@@ -38,6 +43,7 @@ const evt = (headers) => ({
 test.beforeEach(() => {
     _resetCacheForTests();
     secretValue = JSON.stringify({ api_key: 'correct-horse' });
+    sendThrows = null;
     sendCalls = 0;
 });
 
@@ -83,6 +89,35 @@ test('fails CLOSED when the secret is empty', async () => {
 test('fails CLOSED when the secret has no api_key field', async () => {
     secretValue = JSON.stringify({ wrong_field: 'x' });
     assert.strictEqual((await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }))).statusCode, 403);
+});
+
+test('a Secrets Manager failure is a 403, not a crash', async () => {
+    // The window between `terraform apply` and `put-secret-value`: the secret
+    // exists with no value. The gate runs BEFORE the handler's try block, so an
+    // escaping throw is a 502 with the raw AWS message, not a 403.
+    const e = new Error('Secrets Manager cannot find the specified secret value');
+    e.name = 'ResourceNotFoundException';
+    sendThrows = e;
+
+    const res = await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }));
+    assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(JSON.parse(res.body).error, 'Forbidden');
+});
+
+test('unparseable secret JSON is a 403, not a crash', async () => {
+    secretValue = 'not json at all';
+    assert.strictEqual((await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }))).statusCode, 403);
+});
+
+test('a read failure is not cached, so recovery needs no redeploy', async () => {
+    // Caching the failure would keep the API down after the secret is set.
+    const e = new Error('Rate exceeded');
+    e.name = 'ThrottlingException';
+    sendThrows = e;
+    assert.strictEqual((await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }))).statusCode, 403);
+
+    sendThrows = null;   // the secret becomes readable
+    assert.strictEqual(await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' })), null);
 });
 
 test('the secret is cached across calls', async () => {

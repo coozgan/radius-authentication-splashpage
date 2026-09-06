@@ -27,11 +27,25 @@ let _cachedKey = null;
 async function getApiKey() {
     if (_cachedKey) return _cachedKey;
     if (!SECRET_ARN) return null;
-    const resp = await sm.send(new GetSecretValueCommand({ SecretId: SECRET_ARN }));
-    const parsed = JSON.parse(resp.SecretString);
-    // An empty or absent value must not become a valid credential.
-    _cachedKey = parsed.api_key || null;
-    return _cachedKey;
+    try {
+        const resp = await sm.send(new GetSecretValueCommand({ SecretId: SECRET_ARN }));
+        const parsed = JSON.parse(resp.SecretString);
+        // An empty or absent value must not become a valid credential.
+        _cachedKey = parsed.api_key || null;
+        return _cachedKey;
+    } catch (e) {
+        // Between `terraform apply` and `put-secret-value` the secret exists
+        // with no value, and Secrets Manager throws ResourceNotFoundException.
+        // This throw would escape the handler's try block (the gate runs before
+        // it), so API Gateway would answer 502 with the raw AWS message rather
+        // than a clean 403. Unparseable JSON and throttling land here too.
+        //
+        // Returning null routes every one of these into the same fail-closed
+        // path as an unset ARN: refuse, and say so in the log. Nothing is
+        // cached, so the next invocation retries.
+        console.error(`API_KEY_UNREADABLE ${e.name}: ${e.message}`);
+        return null;
+    }
 }
 
 /**
