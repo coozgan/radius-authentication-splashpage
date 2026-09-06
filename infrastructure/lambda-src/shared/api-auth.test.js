@@ -29,8 +29,8 @@ Module._load = function (request, parent, isMain) {
 
 process.env.DASHBOARD_KEY_SECRET_ARN = 'arn:aws:secretsmanager:ap-southeast-1:1:secret:test';
 
-let checkApiKey, _resetCacheForTests;
-({ checkApiKey, _resetCacheForTests } = require('./api-auth'));
+let checkApiKey, _resetCacheForTests, CACHE_TTL_MS;
+({ checkApiKey, _resetCacheForTests, CACHE_TTL_MS } = require('./api-auth'));
 
 Module._load = origLoad;   // restore immediately; the module is now loaded
 
@@ -124,4 +124,34 @@ test('the secret is cached across calls', async () => {
     await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }));
     await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }));
     assert.strictEqual(sendCalls, 1, 'Secrets Manager must be read once per warm container');
+});
+
+test('a rotated key is picked up once the cache TTL elapses', async () => {
+    // The bug this pins was seen in production: a warm container held the
+    // pre-rotation key and rejected the NEW, correct key — the same key
+    // alternating 200 and 403 depending on which container answered. Without a
+    // TTL that container never recovers, so rotation takes the API down for the
+    // container's whole lifetime.
+    const realNow = Date.now;
+    try {
+        let clock = realNow();
+        Date.now = () => clock;
+
+        assert.strictEqual(await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' })), null);
+
+        // Operator rotates the secret.
+        secretValue = JSON.stringify({ api_key: 'new-key' });
+
+        // Still inside the TTL: the container legitimately holds the old key.
+        assert.strictEqual(await checkApiKey(evt({ 'x-dashboard-key': 'new-key' })).then(r => r?.statusCode), 403);
+        assert.strictEqual(sendCalls, 1, 'must not re-read Secrets Manager on every request');
+
+        clock += CACHE_TTL_MS + 1;
+
+        // Past the TTL the new key must work and the old one must not.
+        assert.strictEqual(await checkApiKey(evt({ 'x-dashboard-key': 'new-key' })), null);
+        assert.strictEqual((await checkApiKey(evt({ 'x-dashboard-key': 'correct-horse' }))).statusCode, 403);
+    } finally {
+        Date.now = realNow;
+    }
 });

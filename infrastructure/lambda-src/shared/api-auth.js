@@ -21,17 +21,25 @@ const sm = new SecretsManagerClient({});
 const HEADER = 'x-dashboard-key';
 const SECRET_ARN = process.env.DASHBOARD_KEY_SECRET_ARN;
 
-// Module-level cache, same pattern as the Meraki key — survives warm invocations.
+// Module-level cache, same pattern as the Meraki key — survives warm
+// invocations. Unlike the Meraki key this one EXPIRES, because it is rotated:
+// a container that cached the pre-rotation key would otherwise reject the new,
+// correct key for the container's whole lifetime (hours). Observed live as the
+// same key alternating 200 and 403 across containers. The TTL bounds that
+// window; a rotation is fully live once TTL has elapsed.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 let _cachedKey = null;
+let _cachedAt = 0;
 
 async function getApiKey() {
-    if (_cachedKey) return _cachedKey;
+    if (_cachedKey && Date.now() - _cachedAt < CACHE_TTL_MS) return _cachedKey;
     if (!SECRET_ARN) return null;
     try {
         const resp = await sm.send(new GetSecretValueCommand({ SecretId: SECRET_ARN }));
         const parsed = JSON.parse(resp.SecretString);
         // An empty or absent value must not become a valid credential.
         _cachedKey = parsed.api_key || null;
+        _cachedAt = Date.now();
         return _cachedKey;
     } catch (e) {
         // Between `terraform apply` and `put-secret-value` the secret exists
@@ -100,4 +108,9 @@ function forbidden() {
     };
 }
 
-module.exports = { checkApiKey, HEADER, _resetCacheForTests: () => { _cachedKey = null; } };
+module.exports = {
+    checkApiKey,
+    HEADER,
+    CACHE_TTL_MS,
+    _resetCacheForTests: () => { _cachedKey = null; _cachedAt = 0; },
+};
