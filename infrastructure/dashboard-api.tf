@@ -88,10 +88,13 @@ resource "aws_iam_policy" "dashboard_lambda_secrets" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "SecretsManagerRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = aws_secretsmanager_secret.meraki_api_key.arn
+        Sid    = "SecretsManagerRead"
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [
+          aws_secretsmanager_secret.meraki_api_key.arn,
+          aws_secretsmanager_secret.dashboard_api_key.arn,
+        ]
       }
     ]
   })
@@ -137,6 +140,13 @@ data "archive_file" "dashboard_lambda_zip" {
     content  = file("${path.module}/lambda-src/shared/validate-schedule.js")
     filename = "shared/validate-schedule.js"
   }
+
+  # The authorization gate. Omitting this block is MODULE_NOT_FOUND on every
+  # cold start — the API is down, not open, but it is down completely.
+  source {
+    content  = file("${path.module}/lambda-src/shared/api-auth.js")
+    filename = "shared/api-auth.js"
+  }
 }
 
 resource "aws_lambda_function" "dashboard_api" {
@@ -156,6 +166,7 @@ resource "aws_lambda_function" "dashboard_api" {
       DYNAMODB_TABLE_NAME                 = aws_dynamodb_table.client_tracking.name
       SCHEDULES_TABLE_NAME                = aws_dynamodb_table.schedules.name
       MERAKI_SECRET_ARN                   = aws_secretsmanager_secret.meraki_api_key.arn
+      DASHBOARD_KEY_SECRET_ARN            = aws_secretsmanager_secret.dashboard_api_key.arn
       MERAKI_NETWORK_ID                   = var.meraki_network_id
       SSID_MAP                            = var.ssid_map
       AWS_NODEJS_CONNECTION_REUSE_ENABLED = "1"

@@ -36,9 +36,19 @@ const stub = {
 const command = name => ({ [name]: class { constructor(input) { this.input = input; } } })[name];
 const sdkStub = { ScanCommand: command('ScanCommand'), PutCommand: command('PutCommand'), UpdateCommand: command('UpdateCommand') };
 
+// The shared-secret gate is unit-tested in shared/api-auth.test.js. Here we
+// only control its verdict, so routing tests are not each a credential test.
+// `authDenied` non-null makes checkApiKey reject.
+let authDenied = null;
+const authStub = {
+    checkApiKey: async () => authDenied,
+    HEADER: 'x-dashboard-key',
+};
+
 const load = Module._load;
 Module._load = (request, ...rest) => {
     if (request.endsWith('shared/meraki')) return stub;
+    if (request.endsWith('shared/api-auth')) return authStub;
     if (request.startsWith('@aws-sdk/')) return sdkStub;
     return load(request, ...rest);
 };
@@ -57,6 +67,7 @@ const evt = (method, rawPath, body) => ({
 });
 
 test.beforeEach(() => {
+    authDenied = null;
     calls.length = 0;
     dynamoCalls.length = 0;
     setAuthorizationImpl = async clientId => ({ clientId, revokedAt: '2026-09-05T10:00:00.000Z' });
@@ -138,6 +149,28 @@ test('the extend routes still work alongside revoke', async () => {
     assert.deepStrictEqual(JSON.parse(res.body), {
         success: true, clientId: 'abc123', newExpiration: 'x', lastRenewed: 'y',
     });
+});
+
+// ── Authorization gate ────────────────────────────────────────────────────────
+
+test('an unauthorized request gets the 403 and reaches no route', async () => {
+    authDenied = { statusCode: 403, headers: {}, body: JSON.stringify({ error: 'Forbidden' }) };
+
+    // One route per side effect the handler can have: Meraki, and DynamoDB.
+    for (const e of [
+        evt('POST', '/clients/abc123/revoke'),
+        evt('POST', '/clients/bulk-revoke', { clientIds: ['a'] }),
+        evt('POST', '/schedules', { kind: 'once', action: 'revoke', clientId: 'a', runAt: '2099-01-01T00:00:00.000Z' }),
+        evt('DELETE', '/schedules/sched-1'),
+    ]) {
+        const res = await handler(e);
+        assert.strictEqual(res.statusCode, 403, `${e.rawPath} must be refused`);
+    }
+
+    // The gate has to run BEFORE routing, not alongside it: a 403 that still
+    // deauthorized the client would satisfy the status assertion above.
+    assert.deepStrictEqual(calls, [], 'no Meraki call may happen for a refused request');
+    assert.deepStrictEqual(dynamoCalls, [], 'no DynamoDB write may happen for a refused request');
 });
 
 // ── Schedule routes ───────────────────────────────────────────────────────────

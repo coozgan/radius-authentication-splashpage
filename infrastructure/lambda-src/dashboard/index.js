@@ -22,6 +22,7 @@ const {
     setAuthorization, getAllClients, deleteOne, dynamo,
 } = require('../shared/meraki');
 const { validateScheduleInput } = require('../shared/validate-schedule');
+const { checkApiKey } = require('../shared/api-auth');
 
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE_NAME;
 
@@ -52,6 +53,11 @@ exports.handler = async (event) => {
     const rawPath = event.rawPath || '/';
 
     console.log(`${method} ${rawPath}`);
+
+    // Authorize before any routing, so no handler runs for an unauthenticated
+    // caller. API Gateway has no authorizer; this is the only gate on the API.
+    const denied = await checkApiKey(event);
+    if (denied) return denied;
 
     try {
         // ── GET /clients ──────────────────────────────────────────────────────
